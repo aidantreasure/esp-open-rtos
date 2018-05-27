@@ -66,7 +66,7 @@ COMPONENTS     ?= $(EXTRA_COMPONENTS) FreeRTOS lwip core open_esplibs
 SDK_LIBS		?= main net80211 phy pp wpa
 
 # open source libraries linked in
-LIBS ?= hal gcc c
+LIBS ?= hal
 
 # set to 0 if you want to use the toolchain libc instead of esp-open-rtos newlib
 OWN_LIBC ?= 1
@@ -90,7 +90,7 @@ C_CXX_FLAGS ?= -Wall -Wl,-EL -nostdlib $(EXTRA_C_CXX_FLAGS)
 # Flags for C only
 CFLAGS		?= $(C_CXX_FLAGS) -std=gnu99 $(EXTRA_CFLAGS)
 # Flags for C++ only
-CXXFLAGS	?= $(C_CXX_FLAGS) -fno-exceptions -fno-rtti $(EXTRA_CXXFLAGS)
+CXXFLAGS	?= $(C_CXX_FLAGS) -std=c++0x -fno-exceptions -fno-rtti $(EXTRA_CXXFLAGS)
 
 # these aren't all technically preprocesor args, but used by all 3 of C, C++, assembler
 CPPFLAGS	+= -mlongcalls -mtext-section-literals
@@ -130,6 +130,7 @@ CPPFLAGS += -DGITSHORTREV=$(GITSHORTREV)
 LINKER_SCRIPTS += $(ROOT)ld/program.ld $(ROOT)ld/rom.ld
 
 # rboot firmware binary paths for flashing
+RBOOT_ARGS ?= 0x0 $(RBOOT_BIN) 0x1000 $(RBOOT_CONF)
 RBOOT_BIN = $(ROOT)bootloader/firmware/rboot.bin
 RBOOT_PREBUILT_BIN = $(ROOT)bootloader/firmware_prebuilt/rboot.bin
 RBOOT_CONF = $(ROOT)bootloader/firmware_prebuilt/blank_config.bin

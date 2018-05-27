@@ -1,3 +1,9 @@
-Newlib 2.2.0 with xtensa & locking patches, built from commit daa6ae40cdc8099f54c3e68a586fc1b906169c5a
+Newlib from git://sourceware.org/git/newlib-cygwin.git with xtensa & locking patches see https://github.com/ourairquality/newlib and built from commit 984b749fb223daab954060c04720933290584f00
 
-For details on newlib in esp-open-rtos, see https://github.com/SuperHouse/esp-open-rtos/wiki/libc-configuration
+The build commands were:
+
+mkdir build
+cd build
+../configure --with-newlib --enable-multilib --disable-newlib-io-c99-formats --enable-newlib-supplied-syscalls --enable-target-optspace --program-transform-name="s&^&xtensa-lx106-elf-&" --disable-option-checking --with-target-subdir=xtensa-lx106-elf --target=xtensa-lx106-elf --enable-newlib-nano-malloc --enable-newlib-nano-formatted-io --enable-newlib-reent-small --disable-newlib-mb --enable-newlib-global-stdio-streams --prefix=/tmp/libc
+env CROSS_CFLAGS="-DSIGNAL_PROVIDED -DABORT_PROVIDED" make
+make install

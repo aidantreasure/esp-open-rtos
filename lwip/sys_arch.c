@@ -48,18 +48,148 @@
 #include "lwip/sys.h"
 #include "lwip/mem.h"
 #include "lwip/stats.h"
+#include "lwip/tcpip.h"
 
-extern bool esp_in_isr;
+#if configUSE_16_BIT_TICKS == 1
+#error This port requires 32 bit ticks or timer overflow will fail
+#endif
 
-/* Based on the default xInsideISR mechanism to determine
-   if an ISR is running.
-
-   Doesn't support the possibility that LWIP functions are called from the NMI
-   handler (none are called from NMI when using current/SDK implementation.)
-*/
-static inline bool is_inside_isr()
+/*---------------------------------------------------------------------------*
+ * Routine:  sys_sem_new
+ *---------------------------------------------------------------------------*
+ * Description:
+ *      Creates and returns a new semaphore. The "ucCount" argument specifies
+ *      the initial state of the semaphore.
+ *      NOTE: Currently this routine only creates counts of 1 or 0
+ * Inputs:
+ *      sys_mbox_t mbox         -- Handle of mailbox
+ *      u8_t ucCount            -- Initial ucCount of semaphore (1 or 0)
+ * Outputs:
+ *      sys_sem_t               -- Created semaphore or 0 if could not create.
+ *---------------------------------------------------------------------------*/
+err_t sys_sem_new(sys_sem_t *pxSemaphore, u8_t initial_count)
 {
-    return esp_in_isr;
+    LWIP_ASSERT("initial_count invalid (not 0 or 1)",
+                (initial_count == 0) || (initial_count == 1));
+
+    *pxSemaphore = xSemaphoreCreateBinary();
+    if (*pxSemaphore == NULL) {
+        SYS_STATS_INC(sem.err);
+        return ERR_MEM;
+    }
+    SYS_STATS_INC_USED(sem);
+
+    if (initial_count == 1) {
+        BaseType_t ret = xSemaphoreGive(*pxSemaphore);
+        LWIP_ASSERT("sys_sem_new: initial give failed", ret == pdTRUE);
+    }
+    return ERR_OK;
+}
+
+/*---------------------------------------------------------------------------*
+ * Routine:  sys_sem_free
+ *---------------------------------------------------------------------------*
+ * Description:
+ *      Deallocates a semaphore
+ * Inputs:
+ *      sys_sem_t sem           -- Semaphore to free
+ *---------------------------------------------------------------------------*/
+void sys_sem_free(sys_sem_t *pxSemaphore)
+{
+    SYS_STATS_DEC(sem.used);
+    vSemaphoreDelete(*pxSemaphore);
+    *pxSemaphore = NULL;
+}
+
+/*---------------------------------------------------------------------------*
+ * Routine:  sys_sem_signal
+ *---------------------------------------------------------------------------*
+ * Description:
+ *      Signals (releases) a semaphore
+ * Inputs:
+ *      sys_sem_t sem           -- Semaphore to signal
+ *---------------------------------------------------------------------------*/
+void sys_sem_signal(sys_sem_t *pxSemaphore)
+{
+    xSemaphoreGive(*pxSemaphore);
+}
+
+/*---------------------------------------------------------------------------*
+ * Routine:  sys_arch_sem_wait
+ *---------------------------------------------------------------------------*
+ * Description:
+
+ *      Blocks the thread while waiting for the semaphore to be signaled. If the
+ *      "timeout" argument is non-zero, the thread should only be blocked for
+ *      the specified time (measured in milliseconds). If the "timeout" argument
+ *      is zero, the thread should be blocked until the semaphore is signalled.
+ *
+ *      The return value is SYS_ARCH_TIMEOUT if the semaphore wasn't signaled
+ *      within the specified time or any other value if it was signaled (with or
+ *      without waiting).
+ *
+ *      Notice that lwIP implements a function with a similar name,
+ *      sys_sem_wait(), that uses the sys_arch_sem_wait() function.
+ * Inputs:
+ *      sys_sem_t sem           -- Semaphore to wait on
+ *      u32_t timeout           -- Number of milliseconds until timeout
+ * Outputs:
+ *      u32_t                   -- SYS_ARCH_TIMEOUT on timeout, any other value on success
+ *---------------------------------------------------------------------------*/
+u32_t sys_arch_sem_wait(sys_sem_t *pxSemaphore, u32_t timeout_ms)
+{
+    if (timeout_ms == 0) {
+        /* Wait infinite */
+        while (xSemaphoreTake(*pxSemaphore, portMAX_DELAY) != pdTRUE);
+        return 0;
+    }
+
+    if (xSemaphoreTake(*pxSemaphore, timeout_ms / portTICK_PERIOD_MS) == pdTRUE) {
+        return 0;
+    } else {
+        return SYS_ARCH_TIMEOUT;
+    }
+}
+
+/** Create a new mutex
+ * @param mutex pointer to the mutex to create
+ * @return a new mutex */
+err_t sys_mutex_new(sys_mutex_t *pxMutex)
+{
+    *pxMutex = xSemaphoreCreateRecursiveMutex();
+
+    if (*pxMutex == NULL) {
+        SYS_STATS_INC(mutex.err);
+        return ERR_MEM;
+    }
+
+    SYS_STATS_INC_USED(mutex);
+    return ERR_OK;
+}
+
+/** Lock a mutex
+ * @param mutex the mutex to lock */
+void sys_mutex_lock(sys_mutex_t *pxMutex)
+{
+    while (xSemaphoreTakeRecursive(*pxMutex, portMAX_DELAY) != pdTRUE);
+}
+
+/** Unlock a mutex
+ * @param mutex the mutex to unlock */
+void sys_mutex_unlock(sys_mutex_t *pxMutex)
+{
+    BaseType_t ret = xSemaphoreGiveRecursive(*pxMutex);
+    LWIP_ASSERT("failed to give the mutex", ret == pdTRUE);
+}
+
+
+/** Delete a semaphore
+ * @param mutex the mutex to delete */
+void sys_mutex_free(sys_mutex_t *pxMutex)
+{
+    SYS_STATS_DEC(mutex.used);
+    vSemaphoreDelete(*pxMutex);
+    *pxMutex = NULL;
 }
 
 /*---------------------------------------------------------------------------*
@@ -72,21 +202,20 @@ static inline bool is_inside_isr()
  * Outputs:
  *      sys_mbox_t              -- Handle to new mailbox
  *---------------------------------------------------------------------------*/
-err_t sys_mbox_new( sys_mbox_t *pxMailBox, int iSize )
+err_t sys_mbox_new(sys_mbox_t *mbox, int size)
 {
-    err_t xReturn = ERR_MEM;
+    LWIP_ASSERT("size > 0", size > 0);
 
-    *pxMailBox = xQueueCreate( iSize, sizeof( void * ) );
+    *mbox = xQueueCreate(size, sizeof(void *));
 
-    if( *pxMailBox != NULL )
-    {
-        xReturn = ERR_OK;
-        SYS_STATS_INC_USED( mbox );
+    if (*mbox == NULL) {
+        SYS_STATS_INC(mbox.err);
+        return ERR_MEM;
     }
 
-    return xReturn;
+    SYS_STATS_INC_USED(mbox);
+    return ERR_OK;
 }
-
 
 /*---------------------------------------------------------------------------*
  * Routine:  sys_mbox_free
@@ -100,25 +229,21 @@ err_t sys_mbox_new( sys_mbox_t *pxMailBox, int iSize )
  * Outputs:
  *      sys_mbox_t              -- Handle to new mailbox
  *---------------------------------------------------------------------------*/
-void sys_mbox_free( sys_mbox_t *pxMailBox )
+void sys_mbox_free(sys_mbox_t *mbox)
 {
-unsigned long ulMessagesWaiting;
+    UBaseType_t msgs_waiting;
 
-    ulMessagesWaiting = uxQueueMessagesWaiting( *pxMailBox );
-    configASSERT( ( ulMessagesWaiting == 0 ) );
+    msgs_waiting = uxQueueMessagesWaiting(*mbox);
+    configASSERT(msgs_waiting == 0);
 
-    #if SYS_STATS
-    {
-        if( ulMessagesWaiting != 0UL )
-        {
-            SYS_STATS_INC( mbox.err );
-        }
-
-        SYS_STATS_DEC( mbox.used );
+#if SYS_STATS
+    if (msgs_waiting != 0) {
+        SYS_STATS_INC(mbox.err);
     }
-    #endif /* SYS_STATS */
+    SYS_STATS_DEC(mbox.used);
+#endif /* SYS_STATS */
 
-    vQueueDelete( *pxMailBox );
+    vQueueDelete(*mbox);
 }
 
 /*---------------------------------------------------------------------------*
@@ -130,9 +255,9 @@ unsigned long ulMessagesWaiting;
  *      sys_mbox_t mbox         -- Handle of mailbox
  *      void *data              -- Pointer to data to post
  *---------------------------------------------------------------------------*/
-void sys_mbox_post( sys_mbox_t *pxMailBox, void *pxMessageToPost )
+void sys_mbox_post(sys_mbox_t *mbox, void *msg)
 {
-    while( xQueueSendToBack( *pxMailBox, &pxMessageToPost, portMAX_DELAY ) != pdTRUE );
+    while (xQueueSendToBack(*mbox, &msg, portMAX_DELAY) != pdTRUE);
 }
 
 /*---------------------------------------------------------------------------*
@@ -148,32 +273,21 @@ void sys_mbox_post( sys_mbox_t *pxMailBox, void *pxMessageToPost )
  *      err_t                   -- ERR_OK if message posted, else ERR_MEM
  *                                  if not.
  *---------------------------------------------------------------------------*/
-err_t sys_mbox_trypost( sys_mbox_t *pxMailBox, void *pxMessageToPost )
+err_t sys_mbox_trypost(sys_mbox_t *mbox, void *msg)
 {
-err_t xReturn;
-portBASE_TYPE xHigherPriorityTaskWoken = pdFALSE;
-
-    if( is_inside_isr() != pdFALSE )
-    {
-        xReturn = xQueueSendFromISR( *pxMailBox, &pxMessageToPost, &xHigherPriorityTaskWoken );
-    }
-    else
-    {
-        xReturn = xQueueSend( *pxMailBox, &pxMessageToPost, ( TickType_t ) 0 );
+    if (xQueueSendToBack(*mbox, &msg, 0) == pdTRUE) {
+        return ERR_OK;
     }
 
-    if( xReturn == pdPASS )
-    {
-        xReturn = ERR_OK;
-    }
-    else
-    {
-        /* The queue was already full. */
-        xReturn = ERR_MEM;
-        SYS_STATS_INC( mbox.err );
-    }
+    /* The queue was already full. */
+    SYS_STATS_INC(mbox.err);
+    return ERR_MEM;
+}
 
-    return xReturn;
+err_t sys_mbox_trypost_fromisr(sys_mbox_t *q, void *msg)
+{
+    /* Quietly fail - not implemented. */
+    return ERR_MEM;
 }
 
 /*---------------------------------------------------------------------------*
@@ -188,8 +302,8 @@ portBASE_TYPE xHigherPriorityTaskWoken = pdFALSE;
  *      should be dropped.
  *
  *      The return values are the same as for the sys_arch_sem_wait() function:
- *      Number of milliseconds spent waiting or SYS_ARCH_TIMEOUT if there was a
- *      timeout.
+ *      SYS_ARCH_TIMEOUT if there was a timeout, any other value if a messages
+ *      is received.
  *
  *      Note that a function with a similar name, sys_mbox_fetch(), is
  *      implemented by lwIP.
@@ -198,55 +312,28 @@ portBASE_TYPE xHigherPriorityTaskWoken = pdFALSE;
  *      void **msg              -- Pointer to pointer to msg received
  *      u32_t timeout           -- Number of milliseconds until timeout
  * Outputs:
- *      u32_t                   -- SYS_ARCH_TIMEOUT if timeout, else number
- *                                  of milliseconds until received.
+ *      u32_t                   -- SYS_ARCH_TIMEOUT on timeout, any other value if a message has been received
  *---------------------------------------------------------------------------*/
-u32_t sys_arch_mbox_fetch( sys_mbox_t *pxMailBox, void **ppvBuffer, u32_t ulTimeOut )
+u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
 {
-void *pvDummy;
-TickType_t xStartTime, xEndTime, xElapsed;
-unsigned long ulReturn;
+    void *msg_dummy;
 
-    xStartTime = xTaskGetTickCount();
-
-    if( NULL == ppvBuffer )
-    {
-        ppvBuffer = &pvDummy;
+    if (msg == NULL) {
+        msg = &msg_dummy;
     }
 
-    if( ulTimeOut != 0UL )
-    {
-        configASSERT( is_inside_isr() == ( portBASE_TYPE ) 0 );
-
-        if( pdTRUE == xQueueReceive( *pxMailBox, &( *ppvBuffer ), ulTimeOut/ portTICK_PERIOD_MS ) )
-        {
-            xEndTime = xTaskGetTickCount();
-            xElapsed = ( xEndTime - xStartTime ) * portTICK_PERIOD_MS;
-
-            ulReturn = xElapsed;
-        }
-        else
-        {
-            /* Timed out. */
-            *ppvBuffer = NULL;
-            ulReturn = SYS_ARCH_TIMEOUT;
-        }
-    }
-    else
-    {
-        while( pdTRUE != xQueueReceive( *pxMailBox, &( *ppvBuffer ), portMAX_DELAY ) );
-        xEndTime = xTaskGetTickCount();
-        xElapsed = ( xEndTime - xStartTime ) * portTICK_PERIOD_MS;
-
-        if( xElapsed == 0UL )
-        {
-            xElapsed = 1UL;
-        }
-
-        ulReturn = xElapsed;
+    if (timeout == 0) {
+        while (xQueueReceive(*mbox, &(*msg), portMAX_DELAY) != pdTRUE);
+        return 0;
     }
 
-    return ulReturn;
+    if (xQueueReceive(*mbox, &(*msg), timeout / portTICK_PERIOD_MS) == pdTRUE) {
+        return 0;
+    }
+
+    /* Timed out. */
+    *msg = NULL;
+    return SYS_ARCH_TIMEOUT;
 }
 
 /*---------------------------------------------------------------------------*
@@ -263,216 +350,20 @@ unsigned long ulReturn;
  *      u32_t                   -- SYS_MBOX_EMPTY if no messages.  Otherwise,
  *                                  return ERR_OK.
  *---------------------------------------------------------------------------*/
-u32_t sys_arch_mbox_tryfetch( sys_mbox_t *pxMailBox, void **ppvBuffer )
+u32_t sys_arch_mbox_tryfetch(sys_mbox_t *mbox, void **msg)
 {
-void *pvDummy;
-unsigned long ulReturn;
-long lResult;
-portBASE_TYPE xHigherPriorityTaskWoken = pdFALSE;
+    void *msg_dummy;
 
-    if( ppvBuffer== NULL )
-    {
-        ppvBuffer = &pvDummy;
+    if (msg == NULL) {
+        msg = &msg_dummy;
     }
 
-    if( is_inside_isr() != pdFALSE )
-    {
-        lResult = xQueueReceiveFromISR( *pxMailBox, &( *ppvBuffer ), &xHigherPriorityTaskWoken );
-    }
-    else
-    {
-        lResult = xQueueReceive( *pxMailBox, &( *ppvBuffer ), 0UL );
+    if (xQueueReceive(*mbox, &(*msg), 0) == pdTRUE) {
+        return ERR_OK;
     }
 
-    if( lResult == pdPASS )
-    {
-        ulReturn = ERR_OK;
-    }
-    else
-    {
-        ulReturn = SYS_MBOX_EMPTY;
-    }
-
-    return ulReturn;
-}
-
-/*---------------------------------------------------------------------------*
- * Routine:  sys_sem_new
- *---------------------------------------------------------------------------*
- * Description:
- *      Creates and returns a new semaphore. The "ucCount" argument specifies
- *      the initial state of the semaphore.
- *      NOTE: Currently this routine only creates counts of 1 or 0
- * Inputs:
- *      sys_mbox_t mbox         -- Handle of mailbox
- *      u8_t ucCount              -- Initial ucCount of semaphore (1 or 0)
- * Outputs:
- *      sys_sem_t               -- Created semaphore or 0 if could not create.
- *---------------------------------------------------------------------------*/
-err_t sys_sem_new( sys_sem_t *pxSemaphore, u8_t ucCount )
-{
-err_t xReturn = ERR_MEM;
-
-    vSemaphoreCreateBinary( ( *pxSemaphore ) );
-
-    if( *pxSemaphore != NULL )
-    {
-        if( ucCount == 0U )
-        {
-            xSemaphoreTake( *pxSemaphore, 1UL );
-        }
-
-        xReturn = ERR_OK;
-        SYS_STATS_INC_USED( sem );
-    }
-    else
-    {
-        SYS_STATS_INC( sem.err );
-    }
-
-    return xReturn;
-}
-
-/*---------------------------------------------------------------------------*
- * Routine:  sys_arch_sem_wait
- *---------------------------------------------------------------------------*
- * Description:
- *      Blocks the thread while waiting for the semaphore to be
- *      signaled. If the "timeout" argument is non-zero, the thread should
- *      only be blocked for the specified time (measured in
- *      milliseconds).
- *
- *      If the timeout argument is non-zero, the return value is the number of
- *      milliseconds spent waiting for the semaphore to be signaled. If the
- *      semaphore wasn't signaled within the specified time, the return value is
- *      SYS_ARCH_TIMEOUT. If the thread didn't have to wait for the semaphore
- *      (i.e., it was already signaled), the function may return zero.
- *
- *      Notice that lwIP implements a function with a similar name,
- *      sys_sem_wait(), that uses the sys_arch_sem_wait() function.
- * Inputs:
- *      sys_sem_t sem           -- Semaphore to wait on
- *      u32_t timeout           -- Number of milliseconds until timeout
- * Outputs:
- *      u32_t                   -- Time elapsed or SYS_ARCH_TIMEOUT.
- *---------------------------------------------------------------------------*/
-u32_t sys_arch_sem_wait( sys_sem_t *pxSemaphore, u32_t ulTimeout )
-{
-TickType_t xStartTime, xEndTime, xElapsed;
-unsigned long ulReturn;
-
-    xStartTime = xTaskGetTickCount();
-
-    if( ulTimeout != 0UL )
-    {
-        if( xSemaphoreTake( *pxSemaphore, ulTimeout / portTICK_PERIOD_MS ) == pdTRUE )
-        {
-            xEndTime = xTaskGetTickCount();
-            xElapsed = (xEndTime - xStartTime) * portTICK_PERIOD_MS;
-            ulReturn = xElapsed;
-        }
-        else
-        {
-            ulReturn = SYS_ARCH_TIMEOUT;
-        }
-    }
-    else
-    {
-        while( xSemaphoreTake( *pxSemaphore, portMAX_DELAY ) != pdTRUE );
-        xEndTime = xTaskGetTickCount();
-        xElapsed = ( xEndTime - xStartTime ) * portTICK_PERIOD_MS;
-
-        if( xElapsed == 0UL )
-        {
-            xElapsed = 1UL;
-        }
-
-        ulReturn = xElapsed;
-    }
-
-    return ulReturn;
-}
-
-/** Create a new mutex
- * @param mutex pointer to the mutex to create
- * @return a new mutex */
-err_t sys_mutex_new( sys_mutex_t *pxMutex )
-{
-err_t xReturn = ERR_MEM;
-
-    *pxMutex = xSemaphoreCreateMutex();
-
-    if( *pxMutex != NULL )
-    {
-        xReturn = ERR_OK;
-        SYS_STATS_INC_USED( mutex );
-    }
-    else
-    {
-        SYS_STATS_INC( mutex.err );
-    }
-
-    return xReturn;
-}
-
-/** Lock a mutex
- * @param mutex the mutex to lock */
-void sys_mutex_lock( sys_mutex_t *pxMutex )
-{
-    while( xSemaphoreTake( *pxMutex, portMAX_DELAY ) != pdPASS );
-}
-
-/** Unlock a mutex
- * @param mutex the mutex to unlock */
-void sys_mutex_unlock(sys_mutex_t *pxMutex )
-{
-    xSemaphoreGive( *pxMutex );
-}
-
-
-/** Delete a semaphore
- * @param mutex the mutex to delete */
-void sys_mutex_free( sys_mutex_t *pxMutex )
-{
-    SYS_STATS_DEC( mutex.used );
-    vQueueDelete( *pxMutex );
-}
-
-
-/*---------------------------------------------------------------------------*
- * Routine:  sys_sem_signal
- *---------------------------------------------------------------------------*
- * Description:
- *      Signals (releases) a semaphore
- * Inputs:
- *      sys_sem_t sem           -- Semaphore to signal
- *---------------------------------------------------------------------------*/
-void sys_sem_signal( sys_sem_t *pxSemaphore )
-{
-portBASE_TYPE xHigherPriorityTaskWoken = pdFALSE;
-
-    if( is_inside_isr() != pdFALSE )
-    {
-        xSemaphoreGiveFromISR( *pxSemaphore, &xHigherPriorityTaskWoken );
-    }
-    else
-    {
-        xSemaphoreGive( *pxSemaphore );
-    }
-}
-
-/*---------------------------------------------------------------------------*
- * Routine:  sys_sem_free
- *---------------------------------------------------------------------------*
- * Description:
- *      Deallocates a semaphore
- * Inputs:
- *      sys_sem_t sem           -- Semaphore to free
- *---------------------------------------------------------------------------*/
-void sys_sem_free( sys_sem_t *pxSemaphore )
-{
-    SYS_STATS_DEC(sem.used);
-    vQueueDelete( *pxSemaphore );
+    *msg = NULL;
+    return SYS_MBOX_EMPTY;
 }
 
 /*---------------------------------------------------------------------------*
@@ -488,6 +379,12 @@ void sys_init(void)
 u32_t sys_now(void)
 {
     return xTaskGetTickCount() * portTICK_PERIOD_MS;
+}
+
+void sys_arch_msleep(u32_t delay_ms)
+{
+    TickType_t delay_ticks = delay_ms / portTICK_PERIOD_MS;
+    vTaskDelay(delay_ticks);
 }
 
 /*---------------------------------------------------------------------------*
@@ -508,24 +405,19 @@ u32_t sys_now(void)
  * Outputs:
  *      sys_thread_t            -- Pointer to per-thread timeouts.
  *---------------------------------------------------------------------------*/
-sys_thread_t sys_thread_new( const char *pcName, void( *pxThread )( void *pvParameters ), void *pvArg, int iStackSize, int iPriority )
+sys_thread_t sys_thread_new(const char *pcName, void(*pxThread)(void *pvParameters), void *pvArg, int stacksize, int iPriority)
 {
-TaskHandle_t xCreatedTask;
-portBASE_TYPE xResult;
-sys_thread_t xReturn;
+    TaskHandle_t xCreatedTask;
+    BaseType_t xResult;
 
-    xResult = xTaskCreate( pxThread, pcName, iStackSize, pvArg, iPriority, &xCreatedTask );
+    xResult = xTaskCreate(pxThread, pcName, stacksize, pvArg, iPriority, &xCreatedTask);
+    LWIP_ASSERT("task creation failed", xResult == pdPASS);
 
-    if( xResult == pdPASS )
-    {
-        xReturn = xCreatedTask;
-    }
-    else
-    {
-        xReturn = NULL;
+    if (xResult == pdPASS) {
+        return xCreatedTask;
     }
 
-    return xReturn;
+    return NULL;
 }
 
 /*---------------------------------------------------------------------------*
@@ -547,13 +439,15 @@ sys_thread_t xReturn;
  * Outputs:
  *      sys_prot_t              -- Previous protection level (not used here)
  *---------------------------------------------------------------------------*/
-sys_prot_t sys_arch_protect( void )
+static sys_prot_t critical_nesting;
+sys_prot_t sys_arch_protect(void)
 {
-    if( is_inside_isr() == pdFALSE )
-    {
-        taskENTER_CRITICAL();
-    }
-    return ( sys_prot_t ) 1;
+    sys_prot_t prev;
+    taskENTER_CRITICAL();
+    prev = critical_nesting;
+    critical_nesting++;
+    return prev;
+    //return (sys_prot_t)1;
 }
 
 /*---------------------------------------------------------------------------*
@@ -567,26 +461,70 @@ sys_prot_t sys_arch_protect( void )
  * Inputs:
  *      sys_prot_t              -- Previous protection level (not used here)
  *---------------------------------------------------------------------------*/
-void sys_arch_unprotect( sys_prot_t xValue )
+void sys_arch_unprotect(sys_prot_t pval)
 {
-    (void) xValue;
-    if( is_inside_isr() == pdFALSE )
-    {
-        taskEXIT_CRITICAL();
+    //(void) xValue;
+    critical_nesting--;
+    //LWIP_ASSERT("unexpected critical_nestion", pval == critical_nesting);
+    if (pval != critical_nesting) {
+        printf("lwip nesting %d\n", critical_nesting);
+    }
+    taskEXIT_CRITICAL();
+}
+
+#if LWIP_TCPIP_CORE_LOCKING
+
+/** Flag the core lock held. A counter for recusive locks. */
+u8_t lwip_core_lock_count;
+TaskHandle_t lwip_core_lock_holder_thread;
+void sys_lock_tcpip_core(void)
+{
+    sys_mutex_lock(&lock_tcpip_core);
+    if (lwip_core_lock_count == 0) {
+        lwip_core_lock_holder_thread = xTaskGetCurrentTaskHandle();
+    }
+    lwip_core_lock_count++;
+}
+
+void sys_unlock_tcpip_core(void)
+{
+    lwip_core_lock_count--;
+    if (lwip_core_lock_count == 0) {
+        lwip_core_lock_holder_thread = 0;
+    }
+    sys_mutex_unlock(&lock_tcpip_core);
+}
+
+#endif /* LWIP_TCPIP_CORE_LOCKING */
+
+TaskHandle_t lwip_tcpip_thread;
+void sys_mark_tcpip_thread(void)
+{
+    lwip_tcpip_thread = xTaskGetCurrentTaskHandle();
+}
+
+void sys_check_core_locking(void)
+{
+    /* Embedded systems should check we are NOT in an interrupt context here */
+
+    if (lwip_tcpip_thread != 0) {
+        TaskHandle_t current_thread = xTaskGetCurrentTaskHandle();
+
+#if LWIP_TCPIP_CORE_LOCKING
+        if (current_thread != lwip_core_lock_holder_thread ||
+            lwip_core_lock_count == 0) {
+            printf("Function called without core lock\n");
+        }
+        //LWIP_ASSERT("Function called without core lock", current_thread == lwip_core_lock_holder_thread && lwip_core_lock_count > 0);
+#else
+        if (current_thread != lwip_tcpip_thread) {
+            printf("Function called from wrong thread\n");
+        }
+        //LWIP_ASSERT("Function called from wrong thread", current_thread == lwip_tcpip_thread);
+#endif /* LWIP_TCPIP_CORE_LOCKING */
     }
 }
 
-/*
- * Prints an assertion messages and aborts execution.
- */
-void sys_assert( const char *pcMessage )
-{
-    (void) pcMessage;
-
-    for (;;)
-    {
-    }
-}
 /*-------------------------------------------------------------------------*
  * End of File:  sys_arch.c
  *-------------------------------------------------------------------------*/

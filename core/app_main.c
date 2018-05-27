@@ -134,6 +134,10 @@ static void IRAM default_putc(char c) {
     uart_putc(0, c);
 }
 
+void init_newlib_locks(void);
+extern uint8_t sdk_wDevCtrl[];
+void nano_malloc_insert_chunk(void *start, size_t size);
+
 // .text+0x258
 void IRAM sdk_user_start(void) {
     uint32_t buf32[sizeof(struct sdk_g_ic_saved_st) / 4];
@@ -170,25 +174,32 @@ void IRAM sdk_user_start(void) {
     }
     switch (buf8[3] >> 4) {
         case 0x0:   // 4 Mbit (512 KByte)
-            flash_sectors = 128;
+            flash_size = 524288;
             break;
         case 0x1:  // 2 Mbit (256 Kbyte)
-            flash_sectors = 64;
+            flash_size = 262144;
             break;
         case 0x2:  // 8 Mbit (1 Mbyte)
-            flash_sectors = 256;
+            flash_size = 1048576;
             break;
         case 0x3:  // 16 Mbit (2 Mbyte)
-            flash_sectors = 512;
+        case 0x5:  // 16 Mbit (2 Mbyte)
+            flash_size = 2097152;
             break;
         case 0x4:  // 32 Mbit (4 Mbyte)
-            flash_sectors = 1024;
+        case 0x6:  // 32 Mbit (4 Mbyte)
+            flash_size = 4194304;
+            break;
+        case 0x8:  // 64 Mbit (8 Mbyte)
+            flash_size = 8388608;
+            break;
+        case 0x9:  // 128 Mbit (16 Mbyte)
+            flash_size = 16777216;
             break;
         default:   // Invalid -- Assume 4 Mbit (512 KByte)
-            flash_sectors = 128;
+            flash_size = 524288;
     }
-    //FIXME: we should probably calculate flash_sectors by starting with flash_size and dividing by sdk_flashchip.sector_size instead of vice-versa.
-    flash_size = flash_sectors * 4096;
+    flash_sectors = flash_size / sdk_flashchip.sector_size;
     sdk_flashchip.chip_size = flash_size;
     set_spi0_divisor(flash_speed_divisor);
     sdk_SPIRead(flash_size - 4096, buf32, BOOT_INFO_SIZE);
@@ -201,6 +212,15 @@ void IRAM sdk_user_start(void) {
     Cache_Read_Enable(0, 0, 1);
     zero_bss();
     sdk_os_install_putc1(default_putc);
+
+    /* HACK Reclaim a region of unused bss from wdev.o. This would not be
+     * necessary if the source code to wdev were available, and then it would
+     * not be a fragmented area, but the extra memory is desparately needed and
+     * it is in very useful dram. */
+    nano_malloc_insert_chunk((void *)(sdk_wDevCtrl + 0x2190), 8000);
+
+    init_newlib_locks();
+
     if (cksum_magic == 0xffffffff) {
         // No checksum required
     } else if ((cksum_magic == 0x55aa55aa) &&
@@ -214,8 +234,8 @@ void IRAM sdk_user_start(void) {
     memcpy(&sdk_g_ic.s, buf32, sizeof(struct sdk_g_ic_saved_st));
 
     // By default, put the sysparam region just below the config sectors at the
-    // top of the flash space
-    sysparam_addr = flash_size - (4 + DEFAULT_SYSPARAM_SECTORS) * sdk_flashchip.sector_size;
+    // top of the flash space, and allowing one extra sector spare.
+    sysparam_addr = flash_size - (5 + DEFAULT_SYSPARAM_SECTORS) * sdk_flashchip.sector_size;
     status = sysparam_init(sysparam_addr, flash_size);
     if (status == SYSPARAM_NOTFOUND) {
         status = sysparam_create_area(sysparam_addr, DEFAULT_SYSPARAM_SECTORS, false);
@@ -311,8 +331,8 @@ static void init_g_ic(void) {
     if (sdk_g_ic.s._unknown310 > 4) {
         sdk_g_ic.s._unknown310 = 4;
     }
-    if (sdk_g_ic.s._unknown1e4._unknown1e4 == 0xffffffff) {
-        bzero(&sdk_g_ic.s._unknown1e4, sizeof(sdk_g_ic.s._unknown1e4));
+    if (sdk_g_ic.s.sta_ssid.ssid_length == 0xffffffff) {
+        bzero(&sdk_g_ic.s.sta_ssid, sizeof(sdk_g_ic.s.sta_ssid));
         bzero(&sdk_g_ic.s.sta_password, sizeof(sdk_g_ic.s.sta_password));
     }
     sdk_g_ic.s.wifi_led_enable = 0;
@@ -339,9 +359,15 @@ void sdk_wdt_init(void) {
     sdk_pp_soft_wdt_init();
 }
 
+extern void *xPortSupervisorStackPointer;
+
 // .irom0.text+0x474
 void sdk_user_init_task(void *params) {
     int phy_ver, pp_ver;
+
+    /* The start up stack is not used after scheduling has started, so all of
+     * the top area of RAM which was stack can be used for the dynamic heap. */
+    xPortSupervisorStackPointer = (void *)0x40000000;
 
     sdk_ets_timer_init();
     printf("\nESP-Open-SDK ver: %s compiled @ %s %s\n", OS_VERSION_STR, __DATE__, __TIME__);
@@ -352,18 +378,24 @@ void sdk_user_init_task(void *params) {
     user_init();
     sdk_user_init_flag = 1;
     sdk_wifi_mode_set(sdk_g_ic.s.wifi_mode);
-    if (sdk_g_ic.s.wifi_mode == 1) {
+    if (sdk_g_ic.s.wifi_mode == STATION_MODE) {
         sdk_wifi_station_start();
+        LOCK_TCPIP_CORE();
         netif_set_default(sdk_g_ic.v.station_netif_info->netif);
+        UNLOCK_TCPIP_CORE();
     }
-    if (sdk_g_ic.s.wifi_mode == 2) {
+    if (sdk_g_ic.s.wifi_mode == SOFTAP_MODE) {
         sdk_wifi_softap_start();
+        LOCK_TCPIP_CORE();
         netif_set_default(sdk_g_ic.v.softap_netif_info->netif);
+        UNLOCK_TCPIP_CORE();
     }
-    if (sdk_g_ic.s.wifi_mode == 3) {
+    if (sdk_g_ic.s.wifi_mode == STATIONAP_MODE) {
         sdk_wifi_station_start();
         sdk_wifi_softap_start();
-        netif_set_default(sdk_g_ic.v.softap_netif_info->netif);
+        LOCK_TCPIP_CORE();
+        netif_set_default(sdk_g_ic.v.station_netif_info->netif);
+        UNLOCK_TCPIP_CORE();
     }
     if (sdk_wifi_station_get_auto_connect()) {
         sdk_wifi_station_connect();
@@ -406,8 +438,6 @@ static __attribute__((noinline)) void user_start_phase2(void) {
         memcpy(&phy_info, &default_phy_info, sizeof(sdk_phy_info_t));
     }
 
-    // Disable default buffering on stdout
-    setbuf(stdout, NULL);
     // Wait for UARTs to finish sending anything in their queues.
     uart_flush_txfifo(0);
     uart_flush_txfifo(1);

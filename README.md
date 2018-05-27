@@ -77,9 +77,9 @@ Current status is alpha quality, actively developed. AP STATION mode (ie wifi cl
 
 ## Open Source Components
 
-* [FreeRTOS](http://www.freertos.org/) V9.0.0
-* [lwIP](http://lwip.wikia.com/wiki/LwIP_Wiki) v1.4.1, modified via the [esp-lwip project](https://github.com/kadamski/esp-lwip) by @kadamski.
-* [newlib](https://github.com/projectgus/newlib-xtensa) v2.2.0, with patches for xtensa support and locking stubs for thread-safe operation on FreeRTOS.
+* [FreeRTOS](http://www.freertos.org/) V10.0.1
+* [lwIP](http://lwip.wikia.com/wiki/LwIP_Wiki) v2.0.3, with [some modifications](https://github.com/ourairquality/lwip/).
+* [newlib](https://github.com/ourairquality/newlib) v3.0.0, with patches for xtensa support and locking stubs for thread-safe operation on FreeRTOS.
 
 For details of how third party libraries are integrated, [see the wiki page](https://github.com/SuperHouse/esp-open-rtos/wiki/Third-Party-Libraries).
 
@@ -100,7 +100,7 @@ Some binary libraries appear to contain unattributed open source code:
 
 * BSD license (as described in LICENSE) applies to original source files, [lwIP](http://lwip.wikia.com/wiki/LwIP_Wiki). lwIP is Copyright (C) Swedish Institute of Computer Science.
 
-* FreeRTOS is provided under the GPL with the FreeRTOS linking exception, allowing non-GPL firmwares to be produced using FreeRTOS as the RTOS core. License details in files under FreeRTOS dir. FreeRTOS is Copyright (C) Real Time Engineers Ltd.
+* FreeRTOS (since v10) is provided under the MIT license. License details in files under FreeRTOS dir. FreeRTOS is Copyright (C) Amazon.
 
 * Source & binary components from the [Espressif IOT RTOS SDK](https://github.com/espressif/esp_iot_rtos_sdk) were released under the MIT license. Source code components are relicensed here under the BSD license. The original parts are Copyright (C) Espressif Systems.
 

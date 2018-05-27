@@ -160,6 +160,26 @@ endif
 -include $$($(1)_OBJ_FILES:.o=.d)
 endef
 
+# Remove comment lines from libgcc.remove file
+$(BUILD_DIR)libgcc.remove: $(ROOT)lib/libgcc.remove | $(BUILD_DIR)
+	$(Q) grep -v "^#" $< | cat > $@
+
+# Remove unwanted object files listed in libgcc.remove
+$(BUILD_DIR)libgcc.a: $(ROOT)lib/libgcc.a $(BUILD_DIR)libgcc.remove | $(BUILD_DIR)
+	@echo "Removing unwanted objects from $<"
+	$(Q) cat $< > $@
+	$(Q) $(AR) d $@ @$(word 2,$^)
+
+# Remove comment lines from libc.remove file
+$(BUILD_DIR)libc.remove: $(ROOT)libc/libc.remove | $(BUILD_DIR)
+	$(Q) grep -v "^#" $< | cat > $@
+
+# Remove unwanted object files listed in libgcc.remove
+$(BUILD_DIR)libc.a: $(ROOT)libc/xtensa-lx106-elf/lib/libc.a $(BUILD_DIR)libc.remove | $(BUILD_DIR)
+	@echo "Removing unwanted objects from $<"
+	$(Q) cat $< > $@
+	$(Q) $(AR) d $@ @$(word 2,$^)
+
 ## Linking rules for SDK libraries
 ## SDK libraries are preprocessed to:
 # - remove object files named in <libname>.remove
@@ -208,9 +228,9 @@ $(foreach component,$(COMPONENTS), 					\
 )
 
 # final linking step to produce .elf
-$(PROGRAM_OUT): $(WHOLE_ARCHIVES) $(COMPONENT_ARS) $(SDK_PROCESSED_LIBS) $(LINKER_SCRIPTS)
+$(PROGRAM_OUT): $(WHOLE_ARCHIVES) $(COMPONENT_ARS) $(BUILD_DIR)libgcc.a $(BUILD_DIR)libc.a $(SDK_PROCESSED_LIBS) $(LINKER_SCRIPTS)
 	$(vecho) "LD $@"
-	$(Q) $(LD) $(LDFLAGS) -Wl,--whole-archive $(WHOLE_ARCHIVES) -Wl,--no-whole-archive -Wl,--start-group $(COMPONENT_ARS) $(LIB_ARGS) $(SDK_LIB_ARGS) -Wl,--end-group -o $@
+	$(Q) $(LD) $(LDFLAGS) -Wl,--whole-archive $(WHOLE_ARCHIVES) -Wl,--no-whole-archive -Wl,--start-group $(COMPONENT_ARS) $(BUILD_DIR)libgcc.a $(BUILD_DIR)libc.a $(LIB_ARGS) $(SDK_LIB_ARGS) -Wl,--end-group -o $@
 
 $(BUILD_DIR) $(FIRMWARE_DIR) $(BUILD_DIR)sdklib:
 	$(Q) mkdir -p $@
@@ -224,11 +244,15 @@ $(FW_FILE): $(PROGRAM_OUT) $(FIRMWARE_DIR)
 	$(Q) $(ESPTOOL) elf2image --version=2 $(ESPTOOL_ARGS) $< -o $(FW_FILE)
 
 flash: all
+	$(if will_flash, $(call will_flash, "flash"))
 	$(ESPTOOL) -p $(ESPPORT) --baud $(ESPBAUD) write_flash $(ESPTOOL_ARGS) \
-		0x0 $(RBOOT_BIN) 0x1000 $(RBOOT_CONF) 0x2000 $(FW_FILE) $(SPIFFS_ESPTOOL_ARGS)
+		$(RBOOT_ARGS) 0x2000 $(FW_FILE) $(SPIFFS_ESPTOOL_ARGS)
+	$(if did_flash, $(call did_flash, "flash"))
 
 erase_flash:
+	$(if will_flash, $(call will_flash, "erase"))
 	$(ESPTOOL) -p $(ESPPORT) --baud $(ESPBAUD) erase_flash
+	$(if did_flash, $(call did_flash, "erase"))
 
 size: $(PROGRAM_OUT)
 	$(Q) $(CROSS)size --format=sysv $(PROGRAM_OUT)

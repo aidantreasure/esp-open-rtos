@@ -21,20 +21,6 @@ MEMORY
 pvPortMalloc = malloc;
 vPortFree = free;
 
-/* FreeRTOS lock functions.
-
-   Rely on a patch to libc that produces weak linked versions of the
-   below symbols. Currently treating locking primitives like universal
-   global critical section rather than individual locks, but this seems
-   OK from the use cases in newlib.
-*/
-_lock_acquire = vPortEnterCritical;
-_lock_acquire_recursive = vPortEnterCritical;
-_lock_try_acquire = vPortEnterCritical;
-_lock_try_acquire_recursive = vPortEnterCritical;
-_lock_release = vPortExitCritical;
-_lock_release_recursive = vPortExitCritical;
-
 /* SDK compatibility */
 ets_printf = printf;
 
@@ -127,7 +113,11 @@ SECTIONS
     *libc.a:*bzero.o(.literal .text .literal.* .text.*)
     *libc.a:*lock.o(.literal .text .literal.* .text.*)
 
-    *libc.a:*printf.o(.literal .text .literal.* .text.*)
+    *libc.a:*-printf.o(.literal .text .literal.* .text.*)
+    *libc.a:*-sprintf.o(.literal .text .literal.* .text.*)
+    *libc.a:*-fprintf.o(.literal .text .literal.* .text.*)
+    *libc.a:*-svfprintf.o(.literal .text .literal.* .text.*)
+    *libc.a:*-vfprintf.o(.literal .text .literal.* .text.*)
     *libc.a:*findfp.o(.literal .text .literal.* .text.*)
     *libc.a:*fputwc.o(.literal .text .literal.* .text.*)
 
@@ -263,10 +253,13 @@ SECTIONS
     *(.gnu.linkonce.r.*)
     __XT_EXCEPTION_TABLE__ = ABSOLUTE(.);
     *(.xt_except_table)
-    *(.gcc_except_table)
+    *(.gcc_except_table .gcc_except_table.*)
     *(.gnu.linkonce.e.*)
     *(.gnu.version_r)
-    *(.eh_frame)
+    . = (. + 3) & ~ 3;
+    __eh_frame = ABSOLUTE(.);
+    KEEP(*(.eh_frame))
+    . = (. + 7) & ~ 3;
     . = ALIGN(4);
     *(.dynamic)
     *(.gnu.version_d)
